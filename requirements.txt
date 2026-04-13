@@ -1,0 +1,5 @@
+streamlit>=1.26.0
+random
+numpy
+pandas
+plotly

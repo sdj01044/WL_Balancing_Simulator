@@ -416,6 +416,12 @@ def main():
     """, unsafe_allow_html=True)
 
     # ── 사이드바 ─────────────────────────────────────────────────────────────
+    # 슬라이더 범위를 사이드바 밖에서 미리 계산 (인라인 슬라이더에서도 사용)
+    _df_init = generate_sample_data()  # 초기 범위 계산용 (CSV 업로드 전)
+    _eq_init = _df_init.groupby("설비")["Workload"].sum()
+    slider_min = round(float(_eq_init.min()) * 0.4, 1)
+    slider_max = round(float(_eq_init.max()) * 1.2, 1)
+
     with st.sidebar:
         st.markdown("### ⚙️ 시뮬레이션 설정")
         st.markdown("---")
@@ -446,7 +452,7 @@ def main():
 
         st.markdown("---")
 
-        # K_high / K_low 슬라이더
+        # K_high / K_low 슬라이더 범위 (CSV 업로드 시 갱신)
         eq_wl_total = df_raw.groupby("설비")["Workload"].sum()
         wl_min = float(eq_wl_total.min())
         wl_max = float(eq_wl_total.max())
@@ -529,6 +535,55 @@ def main():
 
     # ── 차트 영역 ─────────────────────────────────────────────────────────────
     st.markdown('<div class="section-title">설비별 Workload 현황</div>', unsafe_allow_html=True)
+
+    # 가로 K_high / K_low 슬라이더
+    ic1, ic2 = st.columns(2)
+    with ic1:
+        st.markdown(
+            '<span style="font-family:JetBrains Mono,monospace; font-size:12px; color:#ff6b6b;">▶ K_high</span>'
+            '<span style="font-size:11px; color:#8b949e; margin-left:8px;">이 값 초과 → 고부하</span>',
+            unsafe_allow_html=True,
+        )
+        k_high = st.slider(
+            "K_high_inline",
+            min_value=slider_min,
+            max_value=slider_max,
+            value=k_high,
+            step=1.0,
+            format="%.1f",
+            key="k_high_inline",
+            label_visibility="collapsed",
+        )
+    with ic2:
+        st.markdown(
+            '<span style="font-family:JetBrains Mono,monospace; font-size:12px; color:#00d4aa;">▶ K_low</span>'
+            '<span style="font-size:11px; color:#8b949e; margin-left:8px;">이 값 미만 → 저부하</span>',
+            unsafe_allow_html=True,
+        )
+        k_low_max2 = max(slider_min, k_high - 1.0)
+        k_low = min(k_low, k_low_max2)
+        k_low = st.slider(
+            "K_low_inline",
+            min_value=slider_min,
+            max_value=k_low_max2,
+            value=k_low,
+            step=1.0,
+            format="%.1f",
+            key="k_low_inline",
+            label_visibility="collapsed",
+        )
+
+    # 인라인 슬라이더 값으로 시뮬레이션 재실행
+    df_sim = run_simulation(df_raw, k_high, k_low)
+    eq_summary = df_sim.groupby("설비").agg(
+        설비총Workload=("설비총Workload", "first"),
+        부하구분=("부하구분", "first"),
+        총STEPSEQ수=("STEPSEQ", "count"),
+        블로킹대상수=("블로킹여부", lambda x: (x == "블로킹(저부하 이전 가능)").sum()),
+        블로킹불가수=("블로킹여부", lambda x: (x == "블로킹(이전 불가 – 주의)").sum()),
+        전용고정수=("블로킹여부", lambda x: (x == "블로킹불가(전용)").sum()),
+    ).reset_index()
+
     eq_wl_df = eq_summary[["설비", "설비총Workload"]].copy()
     st.plotly_chart(chart_eq_workload(eq_wl_df, k_high, k_low), use_container_width=True)
 

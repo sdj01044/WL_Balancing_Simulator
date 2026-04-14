@@ -176,15 +176,11 @@ def generate_sample_data():
     return pd.DataFrame(rows)
 
 # ── Workload Balancing 로직 ────────────────────────────────────────────────
-def run_simulation(df: pd.DataFrame, k_high: float, k_low: float) -> pd.DataFrame:
+def run_simulation(df: pd.DataFrame, k_high: float, k_low: float, k_block: int = 999) -> pd.DataFrame:
     """
-    k_high : 이 값 초과  → 고부하 설비  (블로킹 후보)
-    k_low  : 이 값 미만  → 저부하 설비  (이전 대상)
-    k_low ~ k_high 사이  → 보통 설비    (블로킹·이전 대상 모두 아님)
-
-    블로킹 조건:
-      - 고부하 설비의 STEPSEQ 중 전용설비=False
-      - 해당 STEPSEQ가 저부하 설비(k_low 미만)에서도 진행 가능해야 실제 블로킹
+    k_high  : 이 값 초과  → 고부하 설비  (블로킹 후보)
+    k_low   : 이 값 미만  → 저부하 설비  (이전 대상)
+    k_block : 고부하 설비당 Workload 상위 k_block개만 실제 블로킹 (0 = 블로킹 없음)
     """
     eq_workload = df.groupby("설비")["Workload"].sum().reset_index()
     eq_workload.columns = ["설비", "설비총Workload"]
@@ -198,7 +194,6 @@ def run_simulation(df: pd.DataFrame, k_high: float, k_low: float) -> pd.DataFram
             return "보통"
 
     eq_workload["부하구분"] = eq_workload["설비총Workload"].apply(classify)
-
     df2 = df.merge(eq_workload, on="설비")
 
     def determine_block(row):
@@ -206,23 +201,37 @@ def run_simulation(df: pd.DataFrame, k_high: float, k_low: float) -> pd.DataFram
             return "해당없음"
         if row["전용설비여부"]:
             return "블로킹불가(전용)"
-        return "블로킹대상"
+        return "블로킹후보"
 
     df2["블로킹여부"] = df2.apply(determine_block, axis=1)
 
-    # 저부하 설비에서 진행 가능한 STEPSEQ 목록 (k_low 미만인 설비만)
-    low_load_steps = set(
-        df2[df2["부하구분"] == "저부하"]["STEPSEQ"].unique()
-    )
+    # 저부하 설비에서 진행 가능한 STEPSEQ 목록
+    low_load_steps = set(df2[df2["부하구분"] == "저부하"]["STEPSEQ"].unique())
 
     def check_redirect(row):
-        if row["블로킹여부"] != "블로킹대상":
+        if row["블로킹여부"] != "블로킹후보":
             return row["블로킹여부"]
         if row["STEPSEQ"] in low_load_steps:
             return "블로킹(저부하 이전 가능)"
         return "블로킹(이전 불가 – 주의)"
 
     df2["블로킹여부"] = df2.apply(check_redirect, axis=1)
+
+    # ── K_block 적용: 설비별 이전가능 STEPSEQ 중 Workload 상위 k_block개만 실제 블로킹 ──
+    if k_block < 999:
+        # 이전 가능한 후보 중 상위 k_block개 인덱스 선택
+        candidate_mask = df2["블로킹여부"] == "블로킹(저부하 이전 가능)"
+        candidates = df2[candidate_mask].copy()
+
+        # 설비별 Workload 내림차순 정렬 후 rank
+        candidates["_rank"] = candidates.groupby("설비")["Workload"].rank(
+            ascending=False, method="first"
+        )
+        blocked_idx = candidates[candidates["_rank"] <= k_block].index
+
+        # 블로킹 대상이지만 k_block 초과 → "대기(K_block 초과)"로 표시
+        df2.loc[candidate_mask, "블로킹여부"] = "대기(K_block 초과)"
+        df2.loc[blocked_idx, "블로킹여부"] = "블로킹(저부하 이전 가능)"
 
     return df2
 
@@ -232,6 +241,11 @@ PLOTLY_LAYOUT = dict(
     plot_bgcolor="rgba(0,0,0,0)",
     font=dict(color="#e6edf3", family="JetBrains Mono"),
     margin=dict(l=10, r=10, t=40, b=10),
+)
+
+NO_ZOOM = dict(
+    scrollZoom=False,
+    displayModeBar=False,
 )
 
 def chart_eq_workload(eq_wl: pd.DataFrame, k_high: float, k_low: float):
@@ -267,8 +281,8 @@ def chart_eq_workload(eq_wl: pd.DataFrame, k_high: float, k_low: float):
     fig.update_layout(
         **PLOTLY_LAYOUT,
         title="설비별 총 Workload  (🔴 고부하 · 🟡 보통 · 🟢 저부하)",
-        xaxis=dict(showgrid=False),
-        yaxis=dict(gridcolor="#21262d"),
+        xaxis=dict(showgrid=False, fixedrange=True),
+        yaxis=dict(gridcolor="#21262d", fixedrange=True),
         showlegend=False,
         height=370,
     )
@@ -279,11 +293,10 @@ def chart_step_workload(df_sim: pd.DataFrame, selected_eq: str):
     df_eq = df_sim[df_sim["설비"] == selected_eq].sort_values("Workload", ascending=True)
 
     color_map = {
-        "블로킹대상":            "#ff6b6b",
-        "블로킹(저부하 이전 가능)": "#ff9f43",
-        "블로킹(이전 불가 – 주의)": "#ee5a24",
-        "블로킹불가(전용)":        "#ffd93d",
-        "해당없음":              "#00d4aa",
+        "블로킹(저부하 이전 가능)":  "#ff6b6b",
+        "블로킹(이전 불가 – 주의)":  "#ee5a24",
+        "블로킹불가(전용)":          "#ffd93d",
+        "해당없음":                  "#00d4aa",
     }
     bar_colors = [color_map.get(v, "#8b949e") for v in df_eq["블로킹여부"]]
 
@@ -298,8 +311,8 @@ def chart_step_workload(df_sim: pd.DataFrame, selected_eq: str):
     fig.update_layout(
         **PLOTLY_LAYOUT,
         title=f"{selected_eq} – STEPSEQ별 Workload",
-        xaxis=dict(gridcolor="#21262d"),
-        yaxis=dict(showgrid=False),
+        xaxis=dict(gridcolor="#21262d", fixedrange=True),
+        yaxis=dict(showgrid=False, fixedrange=True),
         height=max(300, len(df_eq) * 28),
     )
     return fig
@@ -326,7 +339,8 @@ def chart_heatmap(df_sim: pd.DataFrame):
         **PLOTLY_LAYOUT,
         title="설비 × STEPSEQ Workload 히트맵",
         height=max(400, len(pivot) * 22),
-        xaxis=dict(side="top"),
+        xaxis=dict(side="top", fixedrange=True),
+        yaxis=dict(fixedrange=True),
     )
     return fig
 
@@ -356,10 +370,10 @@ def chart_sweep_khigh(df: pd.DataFrame, k_low: float):
         title=f"K_high Sweep  (K_low={k_low:,.0f} 고정)",
         height=320,
         legend=dict(bgcolor="rgba(0,0,0,0)", orientation="h", yanchor="bottom", y=1.02),
-        xaxis=dict(title="K_high", gridcolor="#21262d"),
+        xaxis=dict(title="K_high", gridcolor="#21262d", fixedrange=True),
     )
-    fig.update_yaxes(title_text="고부하 설비 수", secondary_y=False, gridcolor="#21262d")
-    fig.update_yaxes(title_text="블로킹 STEPSEQ 수", secondary_y=True, showgrid=False)
+    fig.update_yaxes(title_text="고부하 설비 수", secondary_y=False, gridcolor="#21262d", fixedrange=True)
+    fig.update_yaxes(title_text="블로킹 STEPSEQ 수", secondary_y=True, showgrid=False, fixedrange=True)
     return fig
 
 
@@ -388,10 +402,10 @@ def chart_sweep_klow(df: pd.DataFrame, k_high: float):
         title=f"K_low Sweep  (K_high={k_high:,.0f} 고정)",
         height=320,
         legend=dict(bgcolor="rgba(0,0,0,0)", orientation="h", yanchor="bottom", y=1.02),
-        xaxis=dict(title="K_low", gridcolor="#21262d"),
+        xaxis=dict(title="K_low", gridcolor="#21262d", fixedrange=True),
     )
-    fig.update_yaxes(title_text="저부하 설비 수", secondary_y=False, gridcolor="#21262d")
-    fig.update_yaxes(title_text="블로킹 STEPSEQ 수", secondary_y=True, showgrid=False)
+    fig.update_yaxes(title_text="저부하 설비 수", secondary_y=False, gridcolor="#21262d", fixedrange=True)
+    fig.update_yaxes(title_text="블로킹 STEPSEQ 수", secondary_y=True, showgrid=False, fixedrange=True)
     return fig
 
 
@@ -474,21 +488,38 @@ def main():
 
         st.markdown("**🟢 K_low  (저부하 기준)**")
         st.caption("이 값 미만 → 저부하 설비 (이전 수용 대상)")
-        k_low_max = max(slider_min, k_high - 1.0)
-        k_low_default = min(round(wl_mean * 0.9, 1), k_low_max)
+        # K_low는 K_high와 독립적으로 동작 — max만 전체 범위로 고정
         k_low = st.slider(
             "K_low",
             min_value=slider_min,
-            max_value=k_low_max,
-            value=k_low_default,
+            max_value=slider_max,
+            value=round(wl_mean * 0.9, 1),
             step=1.0,
             format="%.1f",
             key="k_low",
         )
 
+        st.markdown("**🔵 K_block  (설비당 블로킹 수)**")
+        st.caption("고부하 설비당 Workload 상위 K개 STEPSEQ를 블로킹")
+
+        # 블로킹 후보 최대 수 계산 (고부하 설비의 비전용 STEPSEQ 최대치)
+        _sim_preview = run_simulation(df_raw, k_high, k_low)
+        _max_block = int(
+            _sim_preview[_sim_preview["블로킹여부"] == "블로킹(저부하 이전 가능)"]
+            .groupby("설비").size().max()
+        ) if not _sim_preview[_sim_preview["블로킹여부"] == "블로킹(저부하 이전 가능)"].empty else 1
+
+        k_block = st.slider(
+            "K_block",
+            min_value=0,
+            max_value=max(_max_block, 1),
+            value=min(3, _max_block),
+            step=1,
+            key="k_block",
+        )
+
         if k_low >= k_high:
-            st.error("⚠️ K_low는 K_high보다 작아야 합니다.")
-            k_low = k_high - 1.0
+            st.warning("⚠️ K_low ≥ K_high: 보통 구간 없음 (모든 설비가 고/저부하로만 분류됩니다)")
 
         st.markdown("---")
         st.markdown("**설비 상세 보기**")
@@ -499,7 +530,7 @@ def main():
         st.caption("🔴 고부하(K_high 초과) · 🟡 보통 · 🟢 저부하(K_low 미만) · 전용설비 제약")
 
     # ── 시뮬레이션 실행 ──────────────────────────────────────────────────────
-    df_sim = run_simulation(df_raw, k_high, k_low)
+    df_sim = run_simulation(df_raw, k_high, k_low, k_block)
     eq_summary = df_sim.groupby("설비").agg(
         설비총Workload=("설비총Workload", "first"),
         부하구분=("부하구분", "first"),
@@ -512,12 +543,13 @@ def main():
     high_eq  = (eq_summary["부하구분"] == "고부하").sum()
     mid_eq   = (eq_summary["부하구분"] == "보통").sum()
     low_eq   = (eq_summary["부하구분"] == "저부하").sum()
-    total_blocked = df_sim["블로킹여부"].str.startswith("블로킹(").sum()
+    total_blocked = (df_sim["블로킹여부"] == "블로킹(저부하 이전 가능)").sum()
     no_redir = (df_sim["블로킹여부"] == "블로킹(이전 불가 – 주의)").sum()
+    waiting  = (df_sim["블로킹여부"] == "대기(K_block 초과)").sum()
 
     # ── 요약 지표 ────────────────────────────────────────────────────────────
     st.markdown('<div class="section-title">Summary</div>', unsafe_allow_html=True)
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
 
     def metric_html(label, value, css_class=""):
         return f"""
@@ -528,16 +560,17 @@ def main():
 
     with c1: st.markdown(metric_html("K_high", f"{k_high:,.0f}", "high-load"), unsafe_allow_html=True)
     with c2: st.markdown(metric_html("K_low",  f"{k_low:,.0f}",  "low-load"),  unsafe_allow_html=True)
-    with c3: st.markdown(metric_html("고부하 설비", f"{high_eq}대", "high-load"), unsafe_allow_html=True)
-    with c4: st.markdown(metric_html("보통 설비",  f"{mid_eq}대",  "normal-load"), unsafe_allow_html=True)
+    with c3: st.markdown(metric_html("K_block", f"{k_block}개"), unsafe_allow_html=True)
+    with c4: st.markdown(metric_html("고부하 설비", f"{high_eq}대", "high-load"), unsafe_allow_html=True)
     with c5: st.markdown(metric_html("저부하 설비", f"{low_eq}대", "low-load"), unsafe_allow_html=True)
-    with c6: st.markdown(metric_html("이전불가(주의)", f"{no_redir}건", "high-load" if no_redir > 0 else ""), unsafe_allow_html=True)
+    with c6: st.markdown(metric_html("블로킹 STEP", f"{total_blocked}건"), unsafe_allow_html=True)
+    with c7: st.markdown(metric_html("이전불가(주의)", f"{no_redir}건", "high-load" if no_redir > 0 else ""), unsafe_allow_html=True)
 
     # ── 차트 영역 ─────────────────────────────────────────────────────────────
     st.markdown('<div class="section-title">설비별 Workload 현황</div>', unsafe_allow_html=True)
 
-    # 가로 K_high / K_low 슬라이더
-    ic1, ic2 = st.columns(2)
+    # 가로 K_high / K_low / K_block 슬라이더
+    ic1, ic2, ic3 = st.columns(3)
     with ic1:
         st.markdown(
             '<span style="font-family:JetBrains Mono,monospace; font-size:12px; color:#ff6b6b;">▶ K_high</span>'
@@ -545,14 +578,9 @@ def main():
             unsafe_allow_html=True,
         )
         k_high = st.slider(
-            "K_high_inline",
-            min_value=slider_min,
-            max_value=slider_max,
-            value=k_high,
-            step=1.0,
-            format="%.1f",
-            key="k_high_inline",
-            label_visibility="collapsed",
+            "K_high_inline", min_value=slider_min, max_value=slider_max,
+            value=k_high, step=1.0, format="%.1f",
+            key="k_high_inline", label_visibility="collapsed",
         )
     with ic2:
         st.markdown(
@@ -560,21 +588,26 @@ def main():
             '<span style="font-size:11px; color:#8b949e; margin-left:8px;">이 값 미만 → 저부하</span>',
             unsafe_allow_html=True,
         )
-        k_low_max2 = max(slider_min, k_high - 1.0)
-        k_low = min(k_low, k_low_max2)
+        # K_low는 K_high와 독립 — max 범위 전체로 고정
         k_low = st.slider(
-            "K_low_inline",
-            min_value=slider_min,
-            max_value=k_low_max2,
-            value=k_low,
-            step=1.0,
-            format="%.1f",
-            key="k_low_inline",
-            label_visibility="collapsed",
+            "K_low_inline", min_value=slider_min, max_value=slider_max,
+            value=k_low, step=1.0, format="%.1f",
+            key="k_low_inline", label_visibility="collapsed",
+        )
+    with ic3:
+        st.markdown(
+            '<span style="font-family:JetBrains Mono,monospace; font-size:12px; color:#74b9ff;">▶ K_block</span>'
+            '<span style="font-size:11px; color:#8b949e; margin-left:8px;">설비당 블로킹 수</span>',
+            unsafe_allow_html=True,
+        )
+        k_block = st.slider(
+            "K_block_inline", min_value=0, max_value=max(_max_block, 1),
+            value=k_block, step=1,
+            key="k_block_inline", label_visibility="collapsed",
         )
 
     # 인라인 슬라이더 값으로 시뮬레이션 재실행
-    df_sim = run_simulation(df_raw, k_high, k_low)
+    df_sim = run_simulation(df_raw, k_high, k_low, k_block)
     eq_summary = df_sim.groupby("설비").agg(
         설비총Workload=("설비총Workload", "first"),
         부하구분=("부하구분", "first"),
@@ -585,23 +618,23 @@ def main():
     ).reset_index()
 
     eq_wl_df = eq_summary[["설비", "설비총Workload"]].copy()
-    st.plotly_chart(chart_eq_workload(eq_wl_df, k_high, k_low), use_container_width=True)
+    st.plotly_chart(chart_eq_workload(eq_wl_df, k_high, k_low), use_container_width=True, config=NO_ZOOM)
 
     col_l, col_r = st.columns([1, 1])
     with col_l:
         st.markdown('<div class="section-title">K_high Sweep  (K_low 고정)</div>', unsafe_allow_html=True)
-        st.plotly_chart(chart_sweep_khigh(df_raw, k_low), use_container_width=True)
+        st.plotly_chart(chart_sweep_khigh(df_raw, k_low), use_container_width=True, config=NO_ZOOM)
     with col_r:
         st.markdown('<div class="section-title">K_low Sweep  (K_high 고정)</div>', unsafe_allow_html=True)
-        st.plotly_chart(chart_sweep_klow(df_raw, k_high), use_container_width=True)
+        st.plotly_chart(chart_sweep_klow(df_raw, k_high), use_container_width=True, config=NO_ZOOM)
 
     col_l2, col_r2 = st.columns([1, 1])
     with col_l2:
         st.markdown(f'<div class="section-title">{selected_eq} 상세 분석</div>', unsafe_allow_html=True)
-        st.plotly_chart(chart_step_workload(df_sim, selected_eq), use_container_width=True)
+        st.plotly_chart(chart_step_workload(df_sim, selected_eq), use_container_width=True, config=NO_ZOOM)
     with col_r2:
         st.markdown('<div class="section-title">Workload 히트맵 (설비 × STEPSEQ)</div>', unsafe_allow_html=True)
-        st.plotly_chart(chart_heatmap(df_raw), use_container_width=True)
+        st.plotly_chart(chart_heatmap(df_raw), use_container_width=True, config=NO_ZOOM)
 
     # ── 설비 요약 테이블 ──────────────────────────────────────────────────────
     st.markdown('<div class="section-title">설비 요약</div>', unsafe_allow_html=True)
@@ -622,8 +655,9 @@ def main():
     # ── 블로킹 대상 STEPSEQ 상세 테이블 ────────────────────────────────────
     st.markdown('<div class="section-title">블로킹 대상 STEPSEQ 상세</div>', unsafe_allow_html=True)
 
-    tab1, tab2, tab3 = st.tabs([
+    tab1, tab2, tab3, tab4 = st.tabs([
         "🔴 블로킹 (이전 가능)",
+        "⏸️ 대기 (K_block 초과)",
         "⚠️ 블로킹 (이전 불가)",
         "🟡 전용설비 고정",
     ])
@@ -631,13 +665,21 @@ def main():
     cols_show = ["설비", "STEPSEQ", "진행WIP", "대기WIP", "총WIP", "ST(hr)", "Workload", "전용설비여부"]
 
     with tab1:
-        df_t1 = df_sim[df_sim["블로킹여부"] == "블로킹(저부하 이전 가능)"][cols_show].sort_values("Workload", ascending=False)
+        df_t1 = df_sim[df_sim["블로킹여부"] == "블로킹(저부하 이전 가능)"][cols_show].sort_values(["설비", "Workload"], ascending=[True, False])
         if df_t1.empty:
             st.success("블로킹(이전 가능) 대상 STEPSEQ 없음")
         else:
             st.dataframe(df_t1, use_container_width=True, hide_index=True)
 
     with tab2:
+        df_t_wait = df_sim[df_sim["블로킹여부"] == "대기(K_block 초과)"][cols_show].sort_values(["설비", "Workload"], ascending=[True, False])
+        if df_t_wait.empty:
+            st.info("K_block 초과 대기 STEPSEQ 없음 (모두 블로킹 처리됨)")
+        else:
+            st.info(f"ℹ️ {len(df_t_wait)}건 — K_block 한도 초과로 이번 차수에 블로킹되지 않은 STEPSEQ입니다.")
+            st.dataframe(df_t_wait, use_container_width=True, hide_index=True)
+
+    with tab3:
         df_t2 = df_sim[df_sim["블로킹여부"] == "블로킹(이전 불가 – 주의)"][cols_show].sort_values("Workload", ascending=False)
         if df_t2.empty:
             st.success("블로킹(이전 불가) 대상 STEPSEQ 없음")
@@ -645,7 +687,7 @@ def main():
             st.warning(f"⚠️ {len(df_t2)}건의 STEPSEQ가 저부하 설비에 없습니다. 블로킹 전 확인 필요!")
             st.dataframe(df_t2, use_container_width=True, hide_index=True)
 
-    with tab3:
+    with tab4:
         df_t3 = df_sim[df_sim["블로킹여부"] == "블로킹불가(전용)"][cols_show].sort_values("Workload", ascending=False)
         if df_t3.empty:
             st.info("전용 설비 고정 STEPSEQ 없음")

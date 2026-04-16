@@ -453,8 +453,8 @@ def chart_heatmap(df_sim: pd.DataFrame):
             xanchor="left", x=0,
         ),
         height=max(500, n_rows * 22 + 120),
-        margin=dict(l=10, r=10, t=100, b=10),
     )
+    fig.update_layout(margin=dict(l=10, r=10, t=100, b=10))
     return fig
 
 

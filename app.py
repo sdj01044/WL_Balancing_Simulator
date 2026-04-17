@@ -329,79 +329,83 @@ def chart_heatmap(df_raw: pd.DataFrame, df_sim: pd.DataFrame):
     # 설비별 부하구분
     eq_class = df_sim.groupby("설비")["부하구분"].first().to_dict()
 
-    # 블로킹 상태 피벗 (이전가능 / 이전불가만)
+    # 블로킹 상태 피벗
     block_map = {
-        "블로킹(저부하 이전 가능)": "가능",
-        "블로킹(이전 불가 – 주의)": "불가",
+        "블로킹(저부하 이전 가능)": 2,   # 빨강
+        "블로킹(이전 불가 – 주의)": 3,   # 파랑
     }
-    df_block = df_sim[df_sim["블로킹여부"].isin(block_map)].copy()
-    df_block["_btype"] = df_block["블로킹여부"].map(block_map)
+    df_block = df_sim.copy()
+    df_block["_bnum"] = df_block["블로킹여부"].map(block_map)
     pivot_block = df_block.pivot_table(
-        index="STEPSEQ", columns="설비", values="_btype", aggfunc="first"
-    ).reindex(index=stepseqs, columns=equipments)
+        index="STEPSEQ", columns="설비", values="_bnum", aggfunc="first"
+    ).reindex(index=stepseqs, columns=equipments, fill_value=0).fillna(0)
 
-    # ── Heatmap trace (Workload 색상 + 숫자 텍스트) ───────────────────────────
-    z_vals  = pivot_wl.values
-    text_vals = [[f"{v:.0f}" if v > 0 else "" for v in row] for row in z_vals]
+    # ── 셀 색상 행렬 구성 ────────────────────────────────────────────────────
+    # 0 = 해당없음(회색), 2 = 블로킹 이전가능(빨강), 3 = 블로킹 이전불가(파랑)
+    # Workload가 0인 셀(설비-STEPSEQ 조합 없음)은 -1로 처리
+    z_color  = []
+    z_text   = []
+    for step in stepseqs:
+        row_c, row_t = [], []
+        for eq in equipments:
+            wl   = pivot_wl.loc[step, eq]
+            bnum = int(pivot_block.loc[step, eq]) if wl > 0 else -1
+            row_c.append(bnum)
+            row_t.append(f"{wl:.0f}" if wl > 0 else "")
+        z_color.append(row_c)
+        z_text.append(row_t)
+
+    # colorscale: -1=투명(없음), 0=회색, 2=빨강, 3=파랑
+    # 값 범위 -1~3 → 0~1 정규화
+    colorscale = [
+        [0/4,  "rgba(13,17,23,0)"],      # -1 → 투명 (조합 없음)
+        [1/4,  "rgba(48,54,61,0.8)"],    #  0 → 회색 (해당없음)
+        [2/4,  "rgba(48,54,61,0.8)"],    #  0~1 구간 채우기
+        [3/4,  "rgba(255,107,107,0.75)"],#  2 → 빨강
+        [3/4,  "rgba(255,107,107,0.75)"],
+        [4/4,  "rgba(100,181,246,0.75)"],#  3 → 파랑
+    ]
 
     fig = go.Figure(go.Heatmap(
-        z=z_vals,
+        z=z_color,
         x=equipments,
         y=stepseqs,
-        text=text_vals,
+        text=z_text,
         texttemplate="%{text}",
         textfont=dict(size=9, color="white", family="JetBrains Mono"),
-        colorscale=[
-            [0.0, "#0d1117"],
-            [0.3, "#00d4aa"],
-            [0.7, "#ffd93d"],
-            [1.0, "#ff6b6b"],
-        ],
-        showscale=True,
-        colorbar=dict(tickfont=dict(color="#e6edf3"), thickness=12),
+        colorscale=colorscale,
+        zmin=-1, zmax=3,
+        showscale=False,
         xgap=2, ygap=2,
     ))
 
-    # ── 블로킹 마커 오버레이 ──────────────────────────────────────────────────
-    x_can, y_can, x_imp, y_imp = [], [], [], []
-    for ci, eq in enumerate(equipments):
-        for step in stepseqs:
-            btype = pivot_block.loc[step, eq] if step in pivot_block.index and eq in pivot_block.columns else None
-            if btype == "가능":
-                x_can.append(eq); y_can.append(step)
-            elif btype == "불가":
-                x_imp.append(eq); y_imp.append(step)
-
-    if x_can:
+    # ── 범례용 dummy scatter ──────────────────────────────────────────────────
+    legend_items = [
+        ("해당없음",          "rgba(48,54,61,0.8)"),
+        ("블로킹(이전 가능)", "rgba(255,107,107,0.85)"),
+        ("블로킹(이전 불가)", "rgba(100,181,246,0.85)"),
+    ]
+    for label, color in legend_items:
         fig.add_trace(go.Scatter(
-            x=x_can, y=y_can, mode="markers",
-            marker=dict(symbol="x", size=10, color="#ff6b6b",
-                        line=dict(color="#ff6b6b", width=2)),
-            name="블로킹(이전 가능)", showlegend=True,
-        ))
-    if x_imp:
-        fig.add_trace(go.Scatter(
-            x=x_imp, y=y_imp, mode="markers",
-            marker=dict(symbol="x", size=10, color="#74b9ff",
-                        line=dict(color="#74b9ff", width=2)),
-            name="블로킹(이전 불가)", showlegend=True,
+            x=[None], y=[None], mode="markers",
+            marker=dict(size=12, color=color, symbol="square"),
+            name=label, showlegend=True,
         ))
 
-    # ── X축 레이블 색상: 고부하=빨강, 저부하=초록, 보통=기본 ─────────────────
-    label_color_map = {"고부하": "#ff6b6b", "저부하": "#00d4aa"}
+    # ── X축 레이블: 고부하=빨강▲, 저부하=초록▼, 보통=기본색 ─────────────────
     ticktext = []
     for eq in equipments:
         cls = eq_class.get(eq, "보통")
         if cls == "고부하":
-            ticktext.append(f'<b><span style="color:#ff6b6b">{eq}▲</span></b>')
+            ticktext.append(f'<b><span style="color:#ff6b6b">{eq} ▲</span></b>')
         elif cls == "저부하":
-            ticktext.append(f'<b><span style="color:#00d4aa">{eq}▼</span></b>')
+            ticktext.append(f'<b><span style="color:#00d4aa">{eq} ▼</span></b>')
         else:
             ticktext.append(eq)
 
     fig.update_layout(
         **PLOTLY_LAYOUT,
-        title="설비 × STEPSEQ  Workload 히트맵",
+        title="설비 × STEPSEQ  Workload & 블로킹 현황",
         height=max(420, len(stepseqs) * 22 + 80),
         xaxis=dict(
             side="top",
@@ -411,8 +415,10 @@ def chart_heatmap(df_raw: pd.DataFrame, df_sim: pd.DataFrame):
             showgrid=False,
             tickfont=dict(size=11),
         ),
-        yaxis=dict(fixedrange=True, showgrid=False,
-                   tickfont=dict(size=9, family="JetBrains Mono")),
+        yaxis=dict(
+            fixedrange=True, showgrid=False,
+            tickfont=dict(size=9, family="JetBrains Mono"),
+        ),
         legend=dict(
             bgcolor="rgba(22,27,34,0.85)",
             bordercolor="#30363d", borderwidth=1,

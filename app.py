@@ -294,9 +294,10 @@ def chart_step_workload(df_sim: pd.DataFrame, selected_eq: str):
 
     color_map = {
         "블로킹(저부하 이전 가능)":  "#ff6b6b",
-        "블로킹(이전 불가 – 주의)":  "#ee5a24",
+        "블로킹(이전 불가 – 주의)":  "#6495ed",
         "블로킹불가(전용)":          "#ffd93d",
         "해당없음":                  "#00d4aa",
+        "대기(K_block 초과)":        "#74b9ff",
     }
     bar_colors = [color_map.get(v, "#8b949e") for v in df_eq["블로킹여부"]]
 
@@ -307,13 +308,39 @@ def chart_step_workload(df_sim: pd.DataFrame, selected_eq: str):
         marker_color=bar_colors,
         text=df_eq["Workload"].round(1),
         textposition="outside",
+        showlegend=False,
     ))
+
+    # 범례용 dummy scatter
+    legend_items = [
+        ("해당없음",             "#00d4aa"),
+        ("블로킹(이전 가능)",    "#ff6b6b"),
+        ("블로킹(이전 불가)",    "#6495ed"),
+        ("전용설비(블로킹불가)", "#ffd93d"),
+        ("대기(K_block 초과)",   "#74b9ff"),
+    ]
+    for label, color in legend_items:
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode="markers",
+            marker=dict(size=10, color=color, symbol="square"),
+            name=label, showlegend=True,
+        ))
+
     fig.update_layout(
         **PLOTLY_LAYOUT,
         title=f"{selected_eq} – STEPSEQ별 Workload",
         xaxis=dict(gridcolor="#21262d", fixedrange=True),
         yaxis=dict(showgrid=False, fixedrange=True),
-        height=max(300, len(df_eq) * 28),
+        height=max(340, len(df_eq) * 28 + 60),
+        margin=dict(l=10, r=10, t=40, b=60),
+        legend=dict(
+            bgcolor="rgba(22,27,34,0.85)",
+            bordercolor="#30363d", borderwidth=1,
+            font=dict(size=11, color="#e6edf3"),
+            orientation="h",
+            yanchor="top", y=-0.08,
+            xanchor="left", x=0,
+        ),
     )
     return fig
 
@@ -406,7 +433,8 @@ def chart_heatmap(df_raw: pd.DataFrame, df_sim: pd.DataFrame):
     fig.update_layout(
         **PLOTLY_LAYOUT,
         title="설비 × STEPSEQ  Workload & 블로킹 현황",
-        height=max(420, len(stepseqs) * 22 + 80),
+        height=max(460, len(stepseqs) * 22 + 120),
+        margin=dict(l=10, r=10, t=60, b=60),
         xaxis=dict(
             side="top",
             tickvals=equipments,
@@ -424,7 +452,8 @@ def chart_heatmap(df_raw: pd.DataFrame, df_sim: pd.DataFrame):
             bordercolor="#30363d", borderwidth=1,
             font=dict(size=11, color="#e6edf3"),
             orientation="h",
-            yanchor="bottom", y=1.04, xanchor="left", x=0,
+            yanchor="top", y=-0.05,
+            xanchor="left", x=0,
         ),
     )
     return fig

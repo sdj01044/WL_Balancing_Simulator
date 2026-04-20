@@ -332,7 +332,6 @@ def chart_step_workload(df_sim: pd.DataFrame, selected_eq: str):
         xaxis=dict(gridcolor="#21262d", fixedrange=True),
         yaxis=dict(showgrid=False, fixedrange=True),
         height=max(340, len(df_eq) * 28 + 60),
-        margin=dict(l=10, r=10, t=40, b=60),
         legend=dict(
             bgcolor="rgba(22,27,34,0.85)",
             bordercolor="#30363d", borderwidth=1,
@@ -342,6 +341,7 @@ def chart_step_workload(df_sim: pd.DataFrame, selected_eq: str):
             xanchor="left", x=0,
         ),
     )
+    fig.update_layout(margin=dict(l=10, r=10, t=40, b=60))
     return fig
 
 
@@ -434,7 +434,6 @@ def chart_heatmap(df_raw: pd.DataFrame, df_sim: pd.DataFrame):
         **PLOTLY_LAYOUT,
         title="설비 × STEPSEQ  Workload & 블로킹 현황",
         height=max(460, len(stepseqs) * 22 + 120),
-        margin=dict(l=10, r=10, t=60, b=60),
         xaxis=dict(
             side="top",
             tickvals=equipments,
@@ -456,6 +455,7 @@ def chart_heatmap(df_raw: pd.DataFrame, df_sim: pd.DataFrame):
             xanchor="left", x=0,
         ),
     )
+    fig.update_layout(margin=dict(l=10, r=10, t=60, b=60))
     return fig
 
 
